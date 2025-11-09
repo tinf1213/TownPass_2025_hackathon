@@ -12,8 +12,11 @@ import requests
 import socket
 import ipaddress
 import geocoder
+import redis
+import json
 
 app = Flask(__name__)
+r = redis.Redis(host='localhost', port=6379, db=0)
 # --- Your Test Functions ---
 # These are async functions. We use asyncio.sleep to simulate
 # a network call (like to an external API or a database).
@@ -104,9 +107,9 @@ def check_domain_info(url: str) -> dict:
     # 2. Run the blocking WHOIS query in a separate thread
     # This is the correct way to do this in asyncio
     whois_data = _get_whois_data(domain)
-    
+    print(whois_data)
     is_gov = False
-    if domain.endswith("gov.tw"):
+    if domain.endswith("gov.tw") or domain.endswith("gov.taipei"):
         is_gov = True
         
     is_edu = False
@@ -189,6 +192,28 @@ async def ip_location_testing(url):
     g_ip = geocoder.ip(ip_address)
     return g_ip.country, ip_address
 
+def is_redis_connected(r: redis.Redis) -> bool:
+    try:
+        return r.ping()
+    except redis.ConnectionError:
+        return False
+    
+def fetch_cache(url):
+    # 1️⃣ 先查 Redis cache
+    if is_redis_connected(r) == False:
+        return None
+    cached = r.get(url)
+    if cached:
+        print("✅ 使用快取資料")
+        return json.loads(cached)
+    else:
+        return None
+    
+def save_cache(key, value):
+    # 設定快取有效期限 (例如 1 小時)
+    r.setex(key, 3600, json.dumps(value))
+    return True
+
 # --- The API Endpoint ---
 
 @app.route('/test_url', methods=['POST'])
@@ -202,6 +227,14 @@ async def test_url():
     if not data or 'url' not in data:
         return jsonify({"error": "Missing 'url' in request body"}), 400
     url_to_test = data['url']
+
+    print(f'check cache for {url_to_test}')
+    results = fetch_cache(url_to_test)
+    if results == None:
+        print('cache not found')
+    else:
+        print('cache found')
+        return (results), 200
     
     print(f"--- Firing tests for {url_to_test} ---")
     results = []
@@ -236,6 +269,12 @@ async def test_url():
     
     end_time = time.time()
     print(f"--- All tests completed in {end_time - start_time:.2f} seconds ---")
+
+    if save_cache(url_to_test, results) == False:
+        print('save cache failed')
+    else:
+        print('save cache success')
+
     return (results), 200
     # return jsonify({}), 200
 
